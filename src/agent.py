@@ -1,5 +1,6 @@
 import logging
 import textwrap
+import aiohttp
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -7,8 +8,10 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     JobContext,
+    RunContext,
     TurnHandlingOptions,
     cli,
+    function_tool,
     inference,
     room_io,
 )
@@ -71,7 +74,85 @@ class Assistant(Agent):
         )
 
     # To add tools, use the @function_tool decorator.
+    # - Never guess current or real-time information when a relevant tool is available. For current weather questions, always use the weather tool.
     # Here's an example that adds a simple weather tool.
+    @function_tool
+    async def lookup_weather(
+        self,
+        context: RunContext,
+        location: str,
+    ) -> str:
+        """Look up the current weather for a city or location.
+
+        Use this tool whenever the user asks about current weather,
+        temperature, wind, or current outdoor conditions.
+
+        Args:
+            location: City or location to check, for example Guelph or Toronto.
+        """
+
+        logger.info("Looking up live weather for %s", location)
+
+        async with aiohttp.ClientSession() as session:
+            # Step 1: Convert city name into latitude and longitude
+            async with session.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={
+                    "name": location,
+                    "count": 1,
+                    "language": "en",
+                    "format": "json",
+                },
+            ) as response:
+                response.raise_for_status()
+                location_data = await response.json()
+
+            results = location_data.get("results")
+
+            if not results:
+                return f"I could not find a location called {location}."
+
+            place = results[0]
+
+            latitude = place["latitude"]
+            longitude = place["longitude"]
+            city = place["name"]
+            country = place.get("country", "")
+
+            # Step 2: Get current weather for those coordinates
+            async with session.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "current": (
+                        "temperature_2m,"
+                        "apparent_temperature,"
+                        "wind_speed_10m,"
+                        "weather_code"
+                    ),
+                    "temperature_unit": "celsius",
+                    "wind_speed_unit": "kmh",
+                },
+            ) as response:
+                response.raise_for_status()
+                weather_data = await response.json()
+
+            current = weather_data.get("current")
+
+            if not current:
+                return f"Current weather information is unavailable for {city}."
+
+            temperature = current["temperature_2m"]
+            feels_like = current["apparent_temperature"]
+            wind_speed = current["wind_speed_10m"]
+
+            return (
+                f"Live weather for {city}, {country}: "
+                f"temperature {temperature} degrees Celsius, "
+                f"feels like {feels_like} degrees Celsius, "
+                f"wind speed {wind_speed} kilometres per hour."
+            )
     # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
     # @function_tool
     # async def lookup_weather(self, context: RunContext, location: str):
